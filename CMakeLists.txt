@@ -1,413 +1,214 @@
-project(xmr-stak)
+cmake_minimum_required(VERSION 2.8)
+project(xmrig)
 
-cmake_minimum_required(VERSION 3.4.0)
+option(WITH_LIBCPUID "Use Libcpuid" ON)
+option(WITH_AEON     "CryptoNight-Lite support" ON)
+option(WITH_HTTPD    "HTTP REST API" ON)
+option(BUILD_STATIC  "Build static binary" OFF)
 
-# enforce C++11
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)
-set(CMAKE_CXX_STANDARD 11)
+include (CheckIncludeFile)
+include (cmake/cpu.cmake)
 
-if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
-    set(CMAKE_INSTALL_PREFIX "${CMAKE_BINARY_DIR}" CACHE PATH "install prefix" FORCE)
-endif(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
 
-# help to find cuda on systems with a software module system
-list(APPEND CMAKE_PREFIX_PATH "$ENV{CUDA_ROOT}")
-# allow user to extent CMAKE_PREFIX_PATH via environment variable
-list(APPEND CMAKE_PREFIX_PATH "$ENV{CMAKE_PREFIX_PATH}")
+set(HEADERS
+    src/api/Api.h
+    src/api/ApiState.h
+    src/api/NetworkState.h
+    src/App.h
+    src/Console.h
+    src/Cpu.h
+    src/interfaces/IClientListener.h
+    src/interfaces/IConsoleListener.h
+    src/interfaces/IJobResultListener.h
+    src/interfaces/ILogBackend.h
+    src/interfaces/IStrategy.h
+    src/interfaces/IStrategyListener.h
+    src/interfaces/IWorker.h
+    src/log/ConsoleLog.h
+    src/log/FileLog.h
+    src/log/Log.h
+    src/Mem.h
+    src/net/Client.h
+    src/net/Id.h
+    src/net/Job.h
+    src/net/JobResult.h
+    src/net/Network.h
+    src/net/strategies/DonateStrategy.h
+    src/net/strategies/FailoverStrategy.h
+    src/net/strategies/SinglePoolStrategy.h
+    src/net/SubmitResult.h
+    src/net/Url.h
+    src/Options.h
+    src/Platform.h
+    src/Summary.h
+    src/version.h
+    src/workers/DoubleWorker.h
+    src/workers/Handle.h
+    src/workers/Hashrate.h
+    src/workers/SingleWorker.h
+    src/workers/Worker.h
+    src/workers/Workers.h
+    src/xmrig.h
+   )
 
-################################################################################
-# CMake user options
-################################################################################
+set(HEADERS_CRYPTO
+    src/crypto/c_blake256.h
+    src/crypto/c_groestl.h
+    src/crypto/c_jh.h
+    src/crypto/c_keccak.h
+    src/crypto/c_skein.h
+    src/crypto/CryptoNight.h
+    src/crypto/CryptoNight_monero.h
+    src/crypto/CryptoNight_test.h
+    src/crypto/groestl_tables.h
+    src/crypto/hash.h
+    src/crypto/skein_port.h
+    src/crypto/soft_aes.h
+   )
 
-# gcc 5.1 is the first GNU version without CoW strings
-# https://github.com/fireice-uk/xmr-stak-nvidia/pull/10#issuecomment-290821792
-# If you remove this guard to compile with older gcc versions the miner will produce
-# a high rate of wrong shares.
-if(${CMAKE_CXX_COMPILER_ID} STREQUAL "GNU")
-    if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 5.1)
-        message(FATAL_ERROR "g++ version must be at least 5.1!")
-    endif()
-endif()
-
-set(BUILD_TYPE "Release;Debug")
-if(NOT CMAKE_BUILD_TYPE)
-    set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Choose the type of build" FORCE)
-endif()
-set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS "${BUILD_TYPE}")
-
-set(XMR-STAK_COMPILE "native" CACHE STRING "select CPU compute architecture")
-set_property(CACHE XMR-STAK_COMPILE PROPERTY STRINGS "native;generic")
-if(XMR-STAK_COMPILE STREQUAL "native")
-    if(NOT CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
-        set(CMAKE_CXX_FLAGS "-march=native -mtune=native ${CMAKE_CXX_FLAGS}")
-        set(CMAKE_C_FLAGS "-march=native -mtune=native ${CMAKE_C_FLAGS}")
-    endif()
-elseif(XMR-STAK_COMPILE STREQUAL "generic")
-    add_definitions("-DCONF_ENFORCE_OpenCL_1_2=1")
+if (XMRIG_ARM)
+    set(HEADERS_CRYPTO "${HEADERS_CRYPTO}" src/crypto/CryptoNight_arm.h)
 else()
-    message(FATAL_ERROR "XMR-STAK_COMPILE is set to an unknown value '${XMR-STAK_COMPILE}'")
+    set(HEADERS_CRYPTO "${HEADERS_CRYPTO}" src/crypto/CryptoNight_x86.h)
 endif()
 
+set(SOURCES
+    src/api/Api.cpp
+    src/api/ApiState.cpp
+    src/api/NetworkState.cpp
+    src/App.cpp
+    src/Console.cpp
+    src/log/ConsoleLog.cpp
+    src/log/FileLog.cpp
+    src/log/Log.cpp
+    src/Mem.cpp
+    src/net/Client.cpp
+    src/net/Job.cpp
+    src/net/Network.cpp
+    src/net/strategies/DonateStrategy.cpp
+    src/net/strategies/FailoverStrategy.cpp
+    src/net/strategies/SinglePoolStrategy.cpp
+    src/net/SubmitResult.cpp
+    src/net/Url.cpp
+    src/Options.cpp
+    src/Platform.cpp
+    src/Summary.cpp
+    src/workers/DoubleWorker.cpp
+    src/workers/Handle.cpp
+    src/workers/Hashrate.cpp
+    src/workers/SingleWorker.cpp
+    src/workers/Worker.cpp
+    src/workers/Workers.cpp
+    src/xmrig.cpp
+   )
 
+set(SOURCES_CRYPTO
+    src/crypto/c_keccak.c
+    src/crypto/c_groestl.c
+    src/crypto/c_blake256.c
+    src/crypto/c_jh.c
+    src/crypto/c_skein.c
+    src/crypto/CryptoNight.cpp
+   )
 
-# help to find AMD app SDK on systems with a software module system
-list(APPEND CMAKE_PREFIX_PATH "$ENV{AMDAPPSDKROOT}")
-# allow user to extent CMAKE_PREFIX_PATH via environment variable
-list(APPEND CMAKE_PREFIX_PATH "$ENV{CMAKE_PREFIX_PATH}")
-
-###############################################################################
-# Find OpenCL
-###############################################################################
-
-option(OpenCL_ENABLE "Enable or disable OpenCL spport (AMD GPU support)" OFF)
-if(OpenCL_ENABLE)
-    # try to find AMD OpenCL before NVIDIA OpenCL
-    find_path(OpenCL_INCLUDE_DIR
-        NAMES
-            CL/cl.h
-            OpenCL/cl.h
-        NO_DEFAULT_PATH
-        PATHS
-            ENV "OpenCL_ROOT"
-            ENV AMDAPPSDKROOT
-            ENV ATISTREAMSDKROOT
-            ENV "PROGRAMFILES(X86)"
-            /usr
-        PATH_SUFFIXES
-            include
-            OpenCL/common/inc
-            "AMD APP/include")
-
-    find_library(OpenCL_LIBRARY
-        NAMES 
-            OpenCL
-            OpenCL.lib
-        NO_DEFAULT_PATH
-        PATHS
-            ENV "OpenCL_ROOT"
-            ENV AMDAPPSDKROOT
-            ENV ATISTREAMSDKROOT
-            ENV "PROGRAMFILES(X86)"
-        PATH_SUFFIXES
-            "AMD APP/lib/x86_64"
-            lib/x86_64
-            lib/x86_64-linux-gnu
-            lib/x64
-            OpenCL/common/lib/x64)
-    # find package will use the previews searched path variables
-    find_package(OpenCL)
-    if(OpenCL_FOUND)
-        list(APPEND BACKEND_TYPES "amd")
-        include_directories(SYSTEM ${OpenCL_INCLUDE_DIRS})
-        #set(LIBS ${LIBS} ${OpenCL_LIBRARY})
-        link_directories(${OpenCL_LIBRARY})
-    else()
-        message(FATAL_ERROR "OpenCL NOT found: use `-DOpenCL_ENABLE=OFF` to build without OpenCL support for AMD gpu's")
-    endif()
-else()
-    add_definitions("-DCONF_NO_OPENCL")
-endif()
-
-###############################################################################
-# CPU backend
-###############################################################################
-
-option(CPU_ENABLE "Enable or disable CPU support" ON)
-if(NOT CPU_ENABLE)
-    add_definitions("-DCONF_NO_CPU")
-else()
-    list(APPEND BACKEND_TYPES "cpu")
-endif()
-
-################################################################################
-# Find PThreads
-################################################################################
-
-if(NOT WIN32)
-    find_package(Threads REQUIRED)
-    set(LIBS ${LIBS} ${CMAKE_THREAD_LIBS_INIT})
-endif()
-################################################################################
-# Find microhttpd
-################################################################################
-
-option(MICROHTTPD_ENABLE "Enable or disable the requirement of microhttp (http deamon)" ON)
-if(MICROHTTPD_ENABLE)
-    find_path(MTHD_INCLUDE_DIR
-        NAMES
-            microhttpd.h
-        PATHS
-            /opt/local
-            /usr/local
-            /usr
-            ENV "PROGRAMFILES(X86)"
-            ENV "MICROHTTPD_ROOT"
-        PATH_SUFFIXES
-            include)
-
-    find_library(MHTD
-        NAMES
-            microhttpd
-            libmicrohttpd.lib
-        PATHS
-            ENV "MICROHTTPD_ROOT"
-        PATH_SUFFIXES
-            lib)
-    if(MHTD STREQUAL "MHTD-NOTFOUND")
-        message(FATAL_ERROR "microhttpd NOT found: use `-DMICROHTTPD_ENABLE=OFF` to build without http deamon support")
-    else()
-        set(LIBS ${LIBS} ${MHTD})
-        include_directories(AFTER ${MTHD_INCLUDE_DIR})
-    endif()
-else()
-    add_definitions("-DCONF_NO_HTTPD")
-endif()
-
-###############################################################################
-# Find OpenSSL
-###############################################################################
-
-option(OpenSSL_ENABLE "Enable or disable the requirement of OpenSSL" ON)
-if(OpenSSL_ENABLE)
-    find_package(OpenSSL)
-    if(OPENSSL_FOUND)
-        include_directories(${OPENSSL_INCLUDE_DIR})
-        set(LIBS ${LIBS} ${OPENSSL_LIBRARIES})
-    else()
-        message(FATAL_ERROR "OpenSSL NOT found: use `-DOpenSSL_ENABLE=OFF` to build without SSL support")
-    endif()
-else()
-    add_definitions("-DCONF_NO_TLS")
-endif()
-
-################################################################################
-# Find hwloc
-################################################################################
-
-option(HWLOC_ENABLE "Enable or disable the requirement of hwloc" ON)
-if(HWLOC_ENABLE)
-    find_path(HWLOC_INCLUDE_DIR
-        NAMES
-            hwloc.h
-        PATHS
-            /opt/local
-            /usr/local
-            /usr
-            ENV "PROGRAMFILES(X86)"
-            ENV "HWLOC_ROOT"
-        PATH_SUFFIXES
-            include)
-
-    find_library(HWLOC
-        NAMES
-            libhwloc.lib
-            hwloc
-        PATHS
-            ENV "HWLOC_ROOT"
-        PATH_SUFFIXES
-            lib)
-
-    if(HWLOC STREQUAL "HWLOC-NOTFOUND" OR ${HWLOC_INCLUDE_DIR} STREQUAL "HWLOC_INCLUDE_DIR-NOTFOUND")
-        message(FATAL_ERROR "hwloc NOT found: use `-DHWLOC_ENABLE=OFF` to build without hwloc support")
-    else()
-        set(LIBS ${LIBS} ${HWLOC})
-        include_directories(AFTER ${HWLOC_INCLUDE_DIR})
-    endif()
-else()
-    add_definitions("-DCONF_NO_HWLOC")
-endif()
-
-################################################################################
-# Windows Sockets
-################################################################################
-
-if(WIN32)
-    set(LIBS ${LIBS} wsock32 ws2_32)
-endif()
-
-################################################################################
-# Versioning
-################################################################################
-
-# Get the current working branch
-execute_process(
-  COMMAND git rev-parse --abbrev-ref HEAD
-  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-  OUTPUT_VARIABLE GIT_BRANCH
-  OUTPUT_STRIP_TRAILING_WHITESPACE
-)
-
-# Get the latest abbreviated commit hash of the working branch
-execute_process(
-  COMMAND git log -1 --format=%h
-  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-  OUTPUT_VARIABLE GIT_COMMIT_HASH
-  OUTPUT_STRIP_TRAILING_WHITESPACE
-)
-
-if(NOT GIT_COMMIT_HASH STREQUAL "")
-	add_definitions("-DGIT_COMMIT_HASH=${GIT_COMMIT_HASH}")
-endif()
-if(NOT GIT_BRANCH STREQUAL "")
-	add_definitions("-DGIT_BRANCH=${GIT_BRANCH}")
-endif()
-
-# generate backend string
-string(REPLACE ";" "-" STR_BACKEND_TYPES "${BACKEND_TYPES}")
-add_definitions("-DBACKEND_TYPE=${STR_BACKEND_TYPES}")
-
-################################################################################
-# Compile & Link
-################################################################################
-
-include_directories(BEFORE .)
-
-set (CMAKE_POSITION_INDEPENDENT_CODE TRUE)
-
-if(CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
-    # remove warnings that f_open() is not save and f_open_s should be used
-    add_definitions(-D_CRT_SECURE_NO_DEPRECATE)
-    # disable min define to allow usage of std::min
-    add_definitions(-DNOMINMAX)
-else()
-    # activate sse2 and aes-ni
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -msse2 -maes")
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -msse2 -maes")
-
-endif()
-
-# add -Wall for debug builds with gcc
-if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-    if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall")
-        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall")
-    endif()
-endif()
-
-# activate static libgcc and libstdc++ linking
-if(CMAKE_LINK_STATIC)
-    set(BUILD_SHARED_LIBRARIES OFF)
-    set(DL_LIB ${CMAKE_DL_LIBS})
-    set(CMAKE_FIND_LIBRARY_SUFFIXES ".a")
-    if(${CMAKE_CXX_COMPILER_ID} STREQUAL "GNU" OR ${CMAKE_C_COMPILER_ID} STREQUAL "GNU")
-        set(LIBS "-static-libgcc -static-libstdc++ ${LIBS}")
-    endif()
-endif()
-
-# compile C files
-file(GLOB SRCFILES_C "xmrstak/backend/cpu/crypto/*.c")
-
-add_library(xmr-stak-c
-    STATIC
-    ${SRCFILES_C}
-)
-set_property(TARGET xmr-stak-c PROPERTY C_STANDARD 99)
-if(MICROHTTPD_ENABLE)
-    target_link_libraries(xmr-stak-c ${MHTD})
-endif()
-target_link_libraries(xmr-stak-c ${LIBS})
-
-# compile generic backend files
-file(GLOB BACKEND_CPP
-    "xmrstak/*.cpp"
-    "xmrstak/backend/cpu/*.cpp"
-    "xmrstak/backend/*.cpp"
-    "xmrstak/backend/cpu/crypto/*.cpp"
-    "xmrstak/http/*.cpp"
-    "xmrstak/misc/*.cpp"
-    "xmrstak/net/*.cpp")
-
-add_library(xmr-stak-backend
-    STATIC
-    ${BACKEND_CPP}
-)
-target_link_libraries(xmr-stak-backend xmr-stak-c ${CMAKE_DL_LIBS})
-
-# compile CUDA backend
-if(CUDA_FOUND)
-    file(GLOB CUDASRCFILES 
-        "xmrstak/backend/nvidia/nvcc_code/*.cu"
-        "xmrstak/backend/nvidia/*.cpp")
-
-    if(CUDA_COMPILER STREQUAL "clang")
-        # build device code with clang
-        add_library(
-            xmrstak_cuda_backend
-            SHARED
-            ${CUDASRCFILES}
+if (WIN32)
+    set(SOURCES_OS
+        res/app.rc
+        src/App_win.cpp
+        src/Cpu_win.cpp
+        src/Mem_win.cpp
+        src/Platform_win.cpp
         )
-        set_target_properties(xmrstak_cuda_backend PROPERTIES COMPILE_FLAGS ${CLANG_BUILD_FLAGS})
-        set_target_properties(xmrstak_cuda_backend PROPERTIES LINKER_LANGUAGE CXX)
-        set_source_files_properties(${CUDASRCFILES} PROPERTIES LANGUAGE CXX)
-    else()
-        #  build device code with nvcc
-        cuda_add_library(
-            xmrstak_cuda_backend
-            SHARED
-            ${CUDASRCFILES}
+
+    add_definitions(/DWIN32)
+    set(EXTRA_LIBS ws2_32 psapi iphlpapi userenv)
+elseif (APPLE)
+    set(SOURCES_OS
+        src/App_unix.cpp
+        src/Cpu_mac.cpp
+        src/Mem_unix.cpp
+        src/Platform_mac.cpp
         )
-    endif()
-    target_link_libraries(xmrstak_cuda_backend ${CUDA_LIBRARIES})
-    target_link_libraries(xmrstak_cuda_backend xmr-stak-backend)
-endif()
-
-# compile AMD backend
-if(OpenCL_FOUND)
-    file(GLOB OPENCLSRCFILES  
-        "xmrstak/backend/amd/amd_gpu/*.cpp"
-        "xmrstak/backend/amd/*.cpp")
-    add_library(xmrstak_opencl_backend
-        SHARED
-        ${OPENCLSRCFILES}
-    )
-    target_link_libraries(xmrstak_opencl_backend ${OpenCL_LIBRARY} )
-    target_link_libraries(xmrstak_opencl_backend xmr-stak-backend)
-endif()
-
-# compile final binary
-file(GLOB SRCFILES_CPP "xmrstak/cli/*.cpp")
-set_source_files_properties(${SRCFILES_CPP} PROPERTIES LANGUAGE CXX)
-
-if(CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
-    add_executable(xmr-stak ${SRCFILES_CPP} xmrstak/cli/xmr-stak.manifest)
 else()
-    add_executable(xmr-stak ${SRCFILES_CPP})
+    set(SOURCES_OS
+        src/App_unix.cpp
+        src/Cpu_unix.cpp
+        src/Mem_unix.cpp
+        src/Platform_unix.cpp
+        )
+
+    set(EXTRA_LIBS pthread rt)
 endif()
 
-set(EXECUTABLE_OUTPUT_PATH "bin")
-set(LIBRARY_OUTPUT_PATH "bin")
+if (CMAKE_SYSTEM_NAME STREQUAL FreeBSD)
+    set(EXTRA_LIBS ${EXTRA_LIBS} kvm)
+endif()
 
-target_link_libraries(xmr-stak ${LIBS} xmr-stak-c xmr-stak-backend)
-
-################################################################################
-# Install
-################################################################################
-
-
-# do not install the binary if the project and install are equal
-if( NOT CMAKE_INSTALL_PREFIX STREQUAL PROJECT_BINARY_DIR )
-    install(TARGETS xmr-stak
-            RUNTIME DESTINATION "${CMAKE_INSTALL_PREFIX}/bin")
-    if(CUDA_FOUND)
-        if(WIN32)
-            install(TARGETS xmrstak_cuda_backend
-                RUNTIME DESTINATION "${CMAKE_INSTALL_PREFIX}/bin")
-        else()
-            install(TARGETS xmrstak_cuda_backend
-                LIBRARY DESTINATION "${CMAKE_INSTALL_PREFIX}/bin")
-        endif()
+if (CMAKE_SYSTEM_NAME MATCHES "Linux")
+    EXECUTE_PROCESS(COMMAND uname -o COMMAND tr -d '\n' OUTPUT_VARIABLE OPERATING_SYSTEM)
+    if (OPERATING_SYSTEM MATCHES "Android")
+        set(EXTRA_LIBS ${EXTRA_LIBS} log)
     endif()
-    if(OpenCL_FOUND)
-        if(WIN32)
-            install(TARGETS xmrstak_opencl_backend
-                RUNTIME DESTINATION "${CMAKE_INSTALL_PREFIX}/bin")
-        else()
-            install(TARGETS xmrstak_opencl_backend
-                LIBRARY DESTINATION "${CMAKE_INSTALL_PREFIX}/bin")
-        endif()
+endif()
+
+add_definitions(/D__STDC_FORMAT_MACROS)
+add_definitions(/DUNICODE)
+#add_definitions(/DAPP_DEBUG)
+
+set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}/cmake")
+
+find_package(UV REQUIRED)
+
+include(cmake/flags.cmake)
+
+if (WITH_LIBCPUID)
+    add_subdirectory(src/3rdparty/libcpuid)
+
+    include_directories(src/3rdparty/libcpuid)
+    set(CPUID_LIB cpuid)
+    set(SOURCES_CPUID src/Cpu.cpp)
+else()
+    add_definitions(/DXMRIG_NO_LIBCPUID)
+
+    if (XMRIG_ARM)
+        set(SOURCES_CPUID src/Cpu_arm.cpp)
+    else()
+        set(SOURCES_CPUID src/Cpu_stub.cpp)
+    endif()
+endif()
+
+CHECK_INCLUDE_FILE (syslog.h HAVE_SYSLOG_H)
+if (HAVE_SYSLOG_H)
+    add_definitions(/DHAVE_SYSLOG_H)
+    set(SOURCES_SYSLOG src/log/SysLog.h src/log/SysLog.cpp)
+endif()
+
+if (NOT WITH_AEON)
+    add_definitions(/DXMRIG_NO_AEON)
+endif()
+
+if (WITH_HTTPD)
+    find_package(MHD)
+
+    if (MHD_FOUND)
+        include_directories(${MHD_INCLUDE_DIRS})
+        set(HTTPD_SOURCES src/api/Httpd.h src/api/Httpd.cpp)
+    else()
+        message(FATAL_ERROR "microhttpd NOT found: use `-DWITH_HTTPD=OFF` to build without http deamon support")
     endif()
 else()
-    # this rule is used if the install prefix is the build directory
-    install(CODE "MESSAGE(\"xmr-stak installed to folder 'bin'\")")
+    set(MHD_LIBRARY "")
+    add_definitions(/DXMRIG_NO_HTTPD)
+    add_definitions(/DXMRIG_NO_API)
 endif()
+
+include_directories(src)
+include_directories(src/3rdparty)
+include_directories(${UV_INCLUDE_DIR})
+
+if (BUILD_STATIC)
+    set(CMAKE_EXE_LINKER_FLAGS " -static")
+endif()
+
+add_executable(xmrig ${HEADERS} ${SOURCES} ${SOURCES_OS} ${SOURCES_CPUID} ${HEADERS_CRYPTO} ${SOURCES_CRYPTO} ${SOURCES_SYSLOG} ${HTTPD_SOURCES})
+target_link_libraries(xmrig ${UV_LIBRARIES} ${MHD_LIBRARY} ${EXTRA_LIBS} ${CPUID_LIB})
